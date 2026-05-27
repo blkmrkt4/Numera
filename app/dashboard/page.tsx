@@ -5,10 +5,14 @@ import { signOut } from "@/app/login/actions";
 import {
   CATEGORY_LABELS,
   CATEGORY_ORDER,
+  CURRENCIES,
   type AssetCategory,
   type Currency,
 } from "@/lib/types";
-import { formatMoney, relativeAge } from "@/lib/format";
+import { formatDate, formatMoney, relativeAge } from "@/lib/format";
+import { readDisplayCurrencyCookie } from "@/lib/display-currency";
+import { convert, ensureFreshRates, loadLatestRates, type RateLookup } from "@/lib/fx";
+import { setDisplayCurrency } from "./actions";
 
 type AssetRow = {
   id: string;
@@ -32,18 +36,33 @@ export default async function DashboardPage() {
     .eq("id", user.id)
     .maybeSingle();
 
-  // Two queries (views don't expose FKs for PostgREST embed):
-  // 1) all non-archived assets in this household,
-  // 2) the latest-balance view, then join in JS.
+  const { data: household } = profile?.household_id
+    ? await supabase
+        .from("households")
+        .select("default_currency")
+        .eq("id", profile.household_id)
+        .maybeSingle()
+    : { data: null };
+
+  // Display currency: cookie wins, household default is the fallback,
+  // GBP if neither is set (shouldn't happen — household default is NOT NULL).
+  const cookieCurrency = await readDisplayCurrencyCookie();
+  const displayCurrency: Currency =
+    cookieCurrency ?? (household?.default_currency as Currency) ?? "GBP";
+
+  // Make sure we have today's rates before computing totals.
+  // Best-effort: failures fall back to most recent stored rate.
+  await ensureFreshRates(supabase);
+  const { rates, asOf: ratesAsOf } = await loadLatestRates(supabase);
+
+  // Pull all non-archived assets + a lookup of latest balance per asset.
   const [assetsResult, latestResult] = await Promise.all([
     supabase
       .from("assets")
       .select("id, name, category, native_currency, archived")
       .eq("archived", false)
       .order("created_at", { ascending: false }),
-    supabase
-      .from("asset_latest_balances")
-      .select("asset_id, amount, as_of_date"),
+    supabase.from("asset_latest_balances").select("asset_id, amount, as_of_date"),
   ]);
 
   const latestByAsset = new Map<string, { amount: string; as_of_date: string }>();
@@ -60,7 +79,7 @@ export default async function DashboardPage() {
     latest: latestByAsset.get(a.id) ?? null,
   }));
 
-  // Group by category for the breakdown sections.
+  // Group by category for the breakdown.
   const byCategory: Record<AssetCategory, AssetRow[]> = {
     real_estate: [],
     investment: [],
@@ -69,17 +88,21 @@ export default async function DashboardPage() {
   };
   for (const a of assets) byCategory[a.category].push(a);
 
-  // Sum per currency, treating liabilities as subtracting from net worth.
-  const totals: Partial<Record<Currency, number>> = {};
+  // Convert every latest balance to display currency.
+  // Liabilities subtract; missing rates skip silently (no entry from that asset).
+  let netWorth = 0;
+  let anyMissingRate = false;
   for (const a of assets) {
-    const amt = a.latest ? Number(a.latest.amount) : 0;
-    if (!Number.isFinite(amt) || amt === 0) continue;
-    const signed = a.category === "liability" ? -Math.abs(amt) : amt;
-    totals[a.native_currency] = (totals[a.native_currency] ?? 0) + signed;
+    if (!a.latest) continue;
+    const native = Number(a.latest.amount);
+    if (!Number.isFinite(native) || native === 0) continue;
+    const converted = convert(native, a.native_currency, displayCurrency, rates);
+    if (converted === null) {
+      anyMissingRate = true;
+      continue;
+    }
+    netWorth += a.category === "liability" ? -Math.abs(converted) : converted;
   }
-  const totalEntries = (Object.entries(totals) as [Currency, number][])
-    .filter(([, v]) => v !== 0)
-    .sort(([a], [b]) => a.localeCompare(b));
 
   return (
     <div className="min-h-screen">
@@ -103,25 +126,31 @@ export default async function DashboardPage() {
       <main className="mx-auto max-w-5xl px-6 py-12">
         <section className="flex flex-wrap items-end justify-between gap-4">
           <div>
-            <p className="text-sm text-neutral-500">Net worth</p>
-            {totalEntries.length === 0 ? (
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-neutral-500">Net worth</p>
+              <CurrencyToggle current={displayCurrency} />
+            </div>
+            {assets.length === 0 ? (
               <p className="mt-2 text-5xl font-medium tracking-tight tabular text-neutral-400">
                 —
               </p>
             ) : (
-              <div className="mt-2 flex flex-wrap items-baseline gap-x-6 gap-y-2">
-                {totalEntries.map(([ccy, total]) => (
-                  <p key={ccy} className="text-4xl font-medium tracking-tight tabular">
-                    {formatMoney(total, ccy)}
-                  </p>
-                ))}
-              </div>
-            )}
-            {totalEntries.length > 1 ? (
-              <p className="mt-2 text-xs text-neutral-500">
-                Per-currency totals — currency conversion lands in the next step.
+              <p className="mt-2 text-5xl font-medium tracking-tight tabular">
+                {formatMoney(netWorth, displayCurrency)}
               </p>
-            ) : null}
+            )}
+            <p className="mt-2 text-xs text-neutral-500">
+              {ratesAsOf ? (
+                <>FX rates as of {formatDate(ratesAsOf)}</>
+              ) : (
+                <>FX rates not yet loaded</>
+              )}
+              {anyMissingRate ? (
+                <span className="ml-2 text-amber-700 dark:text-amber-500">
+                  · some balances skipped (missing FX)
+                </span>
+              ) : null}
+            </p>
           </div>
           <Link
             href="/assets/new"
@@ -142,7 +171,15 @@ export default async function DashboardPage() {
             {CATEGORY_ORDER.map((cat) => {
               const rows = byCategory[cat];
               if (rows.length === 0) return null;
-              return <CategorySection key={cat} category={cat} rows={rows} />;
+              return (
+                <CategorySection
+                  key={cat}
+                  category={cat}
+                  rows={rows}
+                  displayCurrency={displayCurrency}
+                  rates={rates}
+                />
+              );
             })}
           </section>
         )}
@@ -157,28 +194,64 @@ export default async function DashboardPage() {
   );
 }
 
+function CurrencyToggle({ current }: { current: Currency }) {
+  return (
+    <form action={setDisplayCurrency} className="flex overflow-hidden rounded-md border border-neutral-300 text-xs dark:border-neutral-700">
+      {CURRENCIES.map((c) => {
+        const active = c === current;
+        return (
+          <button
+            key={c}
+            type="submit"
+            name="currency"
+            value={c}
+            aria-pressed={active}
+            className={
+              "px-2.5 py-1 tabular transition-colors " +
+              (active
+                ? "bg-neutral-900 text-white dark:bg-white dark:text-neutral-900"
+                : "text-neutral-600 hover:bg-neutral-100 dark:text-neutral-300 dark:hover:bg-neutral-900")
+            }
+          >
+            {c}
+          </button>
+        );
+      })}
+    </form>
+  );
+}
+
 function CategorySection({
   category,
   rows,
+  displayCurrency,
+  rates,
 }: {
   category: AssetCategory;
   rows: AssetRow[];
+  displayCurrency: Currency;
+  rates: RateLookup;
 }) {
-  // Per-currency subtotal for the category header.
-  const subtotals: Partial<Record<Currency, number>> = {};
+  // Subtotal in display currency (liabilities still positive at the category
+  // level — they only subtract from the headline net worth).
+  let subtotal = 0;
+  let anyMissing = false;
   for (const a of rows) {
-    const amt = a.latest ? Number(a.latest.amount) : 0;
-    if (!Number.isFinite(amt) || amt === 0) continue;
-    subtotals[a.native_currency] = (subtotals[a.native_currency] ?? 0) + amt;
+    if (!a.latest) continue;
+    const native = Number(a.latest.amount);
+    if (!Number.isFinite(native) || native === 0) continue;
+    const converted = convert(native, a.native_currency, displayCurrency, rates);
+    if (converted === null) {
+      anyMissing = true;
+      continue;
+    }
+    subtotal += converted;
   }
-  const subEntries = (Object.entries(subtotals) as [Currency, number][])
-    .filter(([, v]) => v !== 0)
-    .sort(([a], [b]) => a.localeCompare(b));
 
-  // Order rows within a category by latest amount (largest first), unvalued last.
+  // Sort within category: largest converted amount first; unvalued last.
   const sorted = [...rows].sort((a, b) => {
-    const av = a.latest ? Number(a.latest.amount) : -Infinity;
-    const bv = b.latest ? Number(b.latest.amount) : -Infinity;
+    const av = a.latest ? convert(Number(a.latest.amount), a.native_currency, displayCurrency, rates) ?? -Infinity : -Infinity;
+    const bv = b.latest ? convert(Number(b.latest.amount), b.native_currency, displayCurrency, rates) ?? -Infinity : -Infinity;
     return bv - av;
   });
 
@@ -188,17 +261,22 @@ function CategorySection({
         <h2 className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
           {CATEGORY_LABELS[category]}
         </h2>
-        <div className="flex flex-wrap gap-x-4 text-sm text-neutral-500 tabular">
-          {subEntries.length === 0
-            ? null
-            : subEntries.map(([ccy, total]) => (
-                <span key={ccy}>{formatMoney(total, ccy)}</span>
-              ))}
-        </div>
+        <span className="text-sm text-neutral-500 tabular">
+          {formatMoney(subtotal, displayCurrency)}
+          {anyMissing ? <span className="ml-2 text-amber-700 dark:text-amber-500">·</span> : null}
+        </span>
       </div>
       <ul className="mt-3 divide-y divide-neutral-200 rounded-md border border-neutral-200 dark:divide-neutral-800 dark:border-neutral-800">
         {sorted.map((a) => {
           const latest = a.latest;
+          const native = latest ? Number(latest.amount) : null;
+          const converted =
+            latest && native !== null && Number.isFinite(native)
+              ? convert(native, a.native_currency, displayCurrency, rates)
+              : null;
+          const showConversion =
+            latest && a.native_currency !== displayCurrency && converted !== null;
+
           return (
             <li key={a.id}>
               <Link
@@ -220,9 +298,16 @@ function CategorySection({
                     )}
                   </p>
                 </div>
-                <p className="text-base tabular text-neutral-900 dark:text-neutral-100">
-                  {latest ? formatMoney(latest.amount, a.native_currency) : "—"}
-                </p>
+                <div className="text-right">
+                  <p className="text-base tabular text-neutral-900 dark:text-neutral-100">
+                    {latest ? formatMoney(latest.amount, a.native_currency) : "—"}
+                  </p>
+                  {showConversion ? (
+                    <p className="text-xs tabular text-neutral-500">
+                      ≈ {formatMoney(converted!, displayCurrency)}
+                    </p>
+                  ) : null}
+                </div>
               </Link>
             </li>
           );
