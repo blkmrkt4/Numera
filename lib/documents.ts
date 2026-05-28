@@ -103,3 +103,25 @@ export async function getSignedDocumentUrl(
   if (error || !data?.signedUrl) return null;
   return data.signedUrl;
 }
+
+/**
+ * Download a stored document and return it as a base64 data URL.
+ * Used by lib/extraction.ts to ship the document content to a
+ * vision-capable LLM. Never log or persist the returned string.
+ */
+export async function downloadDocumentAsDataUrl(
+  supabase: SupabaseClient,
+  storagePath: string,
+  mimeType: string
+): Promise<{ dataUrl: string; bytes: number } | null> {
+  const { data, error } = await supabase.storage
+    .from("documents")
+    .download(storagePath);
+  if (error || !data) return null;
+  const buffer = Buffer.from(await data.arrayBuffer());
+  const base64 = buffer.toString("base64");
+  return {
+    dataUrl: `data:${mimeType};base64,${base64}`,
+    bytes: buffer.length,
+  };
+}

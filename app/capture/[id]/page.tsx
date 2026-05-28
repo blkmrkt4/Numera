@@ -3,31 +3,18 @@ import { notFound, redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { getSignedDocumentUrl } from "@/lib/documents";
 import { formatDate, todayIso } from "@/lib/format";
-import {
-  CATEGORY_LABELS,
-  CATEGORY_ORDER,
-  CURRENCIES,
-  type AssetCategory,
-  type Currency,
-} from "@/lib/types";
-import { linkDocumentToBalance } from "../actions";
-
-type AssetOption = {
-  id: string;
-  name: string;
-  category: AssetCategory;
-  native_currency: Currency;
-};
+import type { AssetCategory, Currency } from "@/lib/types";
+import { ReviewForm, type AssetOption, type Extracted } from "./review-form";
 
 export default async function CaptureLinkPage({
   params,
   searchParams,
 }: {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ error?: string }>;
+  searchParams: Promise<{ error?: string; extract_error?: string }>;
 }) {
   const { id } = await params;
-  const { error: errorParam } = await searchParams;
+  const { error: errorParam, extract_error } = await searchParams;
 
   const supabase = await createClient();
   const {
@@ -37,19 +24,37 @@ export default async function CaptureLinkPage({
 
   const { data: doc } = await supabase
     .from("documents")
-    .select("id, file_name, mime_type, size_bytes, storage_path, uploaded_at")
+    .select("id, file_name, mime_type, size_bytes, storage_path, uploaded_at, status, extracted_json")
     .eq("id", id)
     .maybeSingle();
   if (!doc) notFound();
 
   const signedUrl = await getSignedDocumentUrl(supabase, doc.storage_path);
 
+  // Load every asset in the household with its institution name so the
+  // review form can pre-select a match when extraction returns an
+  // institution + last4 it recognises.
   const { data: assetsRaw } = await supabase
     .from("assets")
-    .select("id, name, category, native_currency")
+    .select("id, name, category, native_currency, institution_id, institutions(name)")
     .eq("archived", false)
     .order("name", { ascending: true });
-  const assets: AssetOption[] = (assetsRaw ?? []) as AssetOption[];
+
+  const assets: AssetOption[] = (assetsRaw ?? []).map((a) => {
+    const inst = Array.isArray(a.institutions) ? a.institutions[0] : a.institutions;
+    return {
+      id: a.id,
+      name: a.name,
+      category: a.category as AssetCategory,
+      native_currency: a.native_currency as Currency,
+      institution_name: inst?.name ?? null,
+    };
+  });
+
+  const extracted: Extracted | null =
+    doc.status === "extracted" && doc.extracted_json
+      ? (doc.extracted_json as Extracted)
+      : null;
 
   const isImage = doc.mime_type.startsWith("image/");
   const isPdf = doc.mime_type === "application/pdf";
@@ -57,25 +62,29 @@ export default async function CaptureLinkPage({
   return (
     <div className="min-h-screen">
       <header className="border-b border-neutral-200 dark:border-neutral-800">
-        <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <Link
             href="/dashboard"
             className="text-sm text-neutral-500 hover:text-neutral-900 dark:hover:text-neutral-100"
           >
             ← Dashboard
           </Link>
-          <h1 className="text-base font-medium tracking-tight">Link to asset</h1>
+          <h1 className="text-base font-medium tracking-tight">
+            {extracted ? "Review and confirm" : "Link to asset"}
+          </h1>
           <span className="w-20" />
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-5xl gap-8 px-6 py-12 lg:grid-cols-[1fr_360px]">
+      <main className="mx-auto grid max-w-6xl gap-8 px-6 py-10 lg:grid-cols-[1fr_440px]">
         <section>
           <p className="text-xs text-neutral-500">{doc.file_name}</p>
           <p className="mt-1 text-xs text-neutral-400">
-            Uploaded {formatDate(doc.uploaded_at.slice(0, 10))} · {formatBytes(doc.size_bytes)}
+            Uploaded {formatDate(doc.uploaded_at.slice(0, 10))} ·{" "}
+            {formatBytes(doc.size_bytes)}
+            {extracted ? <span className="ml-2 text-green-700 dark:text-green-400">· extracted</span> : null}
           </p>
-          <div className="mt-4 overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-800">
+          <div className="mt-3 overflow-hidden rounded-md border border-neutral-200 dark:border-neutral-800">
             {signedUrl ? (
               isImage ? (
                 // eslint-disable-next-line @next/next/no-img-element
@@ -84,12 +93,17 @@ export default async function CaptureLinkPage({
                 <iframe
                   src={signedUrl}
                   title={doc.file_name}
-                  className="h-[640px] w-full"
+                  className="h-[760px] w-full"
                 />
               ) : (
                 <div className="px-4 py-6 text-sm text-neutral-500">
                   No inline preview for this file type.{" "}
-                  <a href={signedUrl} className="underline" target="_blank" rel="noopener noreferrer">
+                  <a
+                    href={signedUrl}
+                    className="underline"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
                     Open in a new tab
                   </a>
                 </div>
@@ -103,116 +117,32 @@ export default async function CaptureLinkPage({
         </section>
 
         <section>
-          <form action={linkDocumentToBalance} className="space-y-5">
-            <input type="hidden" name="document_id" value={doc.id} />
-
-            <div>
-              <label className="block text-sm text-neutral-600 dark:text-neutral-400">
-                Asset
-                <select
-                  name="asset_id"
-                  required
-                  defaultValue=""
-                  className="mt-1 block w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-base text-neutral-900 outline-none focus:border-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-50 dark:focus:border-neutral-100"
-                >
-                  <option value="" disabled>
-                    Pick an asset…
-                  </option>
-                  {assets.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name} ({a.native_currency})
-                    </option>
-                  ))}
-                  <option value="__new__">+ Create new asset</option>
-                </select>
-              </label>
+          {extract_error ? (
+            <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+              <p className="font-medium">Extraction failed — fall back to manual entry.</p>
+              <p className="mt-1 text-xs">{decodeURIComponent(extract_error)}</p>
             </div>
+          ) : null}
 
-            <details className="rounded-md border border-dashed border-neutral-300 px-3 py-2 text-sm text-neutral-600 dark:border-neutral-700 dark:text-neutral-400">
-              <summary className="cursor-pointer text-xs text-neutral-500">
-                Fields for a new asset (only used if you picked “Create new asset”)
-              </summary>
-              <div className="mt-3 space-y-3">
-                <label className="block">
-                  <span className="block text-xs">Name</span>
-                  <input
-                    type="text"
-                    name="new_asset_name"
-                    maxLength={100}
-                    placeholder="e.g. HSBC current account"
-                    className="mt-1 block w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 outline-none focus:border-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-50 dark:focus:border-neutral-100"
-                  />
-                </label>
-                <label className="block">
-                  <span className="block text-xs">Category</span>
-                  <select
-                    name="new_asset_category"
-                    defaultValue="cash"
-                    className="mt-1 block w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 outline-none focus:border-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-50 dark:focus:border-neutral-100"
-                  >
-                    {CATEGORY_ORDER.map((c) => (
-                      <option key={c} value={c}>
-                        {CATEGORY_LABELS[c]}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="block">
-                  <span className="block text-xs">Currency</span>
-                  <select
-                    name="new_asset_currency"
-                    defaultValue="GBP"
-                    className="mt-1 block w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 outline-none focus:border-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-50 dark:focus:border-neutral-100"
-                  >
-                    {CURRENCIES.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-            </details>
-
-            <div>
-              <label className="block text-sm text-neutral-600 dark:text-neutral-400">
-                Amount
-                <input
-                  type="text"
-                  name="amount"
-                  required
-                  inputMode="decimal"
-                  placeholder="0.00"
-                  className="mt-1 block w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-base text-neutral-900 tabular outline-none focus:border-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-50 dark:focus:border-neutral-100"
-                />
-              </label>
+          {errorParam ? (
+            <div className="mb-4 rounded-md border border-red-300 bg-red-50 p-3 text-sm text-red-900 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+              {decodeURIComponent(errorParam)}
             </div>
+          ) : null}
 
-            <div>
-              <label className="block text-sm text-neutral-600 dark:text-neutral-400">
-                As of
-                <input
-                  type="date"
-                  name="as_of_date"
-                  required
-                  defaultValue={todayIso()}
-                  max={todayIso()}
-                  className="mt-1 block w-full rounded-md border border-neutral-300 bg-white px-3 py-2 text-base text-neutral-900 outline-none focus:border-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-50 dark:focus:border-neutral-100"
-                />
-              </label>
-            </div>
+          {extracted ? (
+            <p className="mb-4 text-xs text-neutral-500">
+              Fields below were extracted by the model. Review every line —
+              nothing saves until you tap Confirm.
+            </p>
+          ) : null}
 
-            {errorParam ? (
-              <p className="text-sm text-red-600 dark:text-red-400">{errorParam}</p>
-            ) : null}
-
-            <button
-              type="submit"
-              className="w-full rounded-md bg-neutral-900 px-5 py-2.5 text-sm text-white transition-opacity hover:opacity-90 dark:bg-white dark:text-neutral-900"
-            >
-              Save balance
-            </button>
-          </form>
+          <ReviewForm
+            documentId={doc.id}
+            extracted={extracted}
+            assets={assets}
+            todayIso={todayIso()}
+          />
         </section>
       </main>
     </div>

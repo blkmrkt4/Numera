@@ -17,6 +17,13 @@ export type LlmCallOptions = {
   systemMessage?: string;
   /** Provide extra messages (images, examples) appended after the prompt body. */
   extraMessages?: LlmMessage[];
+  /**
+   * Attach images to the user turn that carries the rendered prompt body.
+   * Each entry is a base64 data URL (e.g. `data:image/jpeg;base64,...`).
+   * The text + images get sent as a single multipart user message, which
+   * is what most vision-capable models prefer.
+   */
+  images?: string[];
   /** Override the per-attempt timeout (default 30s). */
   timeoutMs?: number;
   /**
@@ -106,7 +113,21 @@ export async function llmCall(
 
   const messages: LlmMessage[] = [];
   if (opts.systemMessage) messages.push({ role: "system", content: opts.systemMessage });
-  messages.push({ role: "user", content: renderedBody });
+
+  if (opts.images?.length) {
+    // Multimodal user turn: text + image parts in one message.
+    const parts: Array<
+      | { type: "text"; text: string }
+      | { type: "image_url"; image_url: { url: string } }
+    > = [{ type: "text", text: renderedBody }];
+    for (const url of opts.images) {
+      parts.push({ type: "image_url", image_url: { url } });
+    }
+    messages.push({ role: "user", content: parts });
+  } else {
+    messages.push({ role: "user", content: renderedBody });
+  }
+
   if (opts.extraMessages?.length) messages.push(...opts.extraMessages);
 
   const chain: Array<{ model: string | null; tier: 0 | 1 | 2 }> = [
@@ -128,7 +149,16 @@ export async function llmCall(
       max_tokens: binding.max_tokens ?? undefined,
       response_format:
         binding.response_format === "json"
-          ? { type: "json_object" }
+          ? binding.json_schema
+            ? {
+                type: "json_schema",
+                json_schema: {
+                  name: `${promptSlug}_output`,
+                  schema: binding.json_schema as Record<string, unknown>,
+                  strict: true,
+                },
+              }
+            : { type: "json_object" }
           : { type: "text" },
       timeoutMs: opts.timeoutMs,
     });

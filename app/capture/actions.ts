@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { uploadDocument } from "@/lib/documents";
+import { extractStatement } from "@/lib/extraction";
 import { CURRENCIES, type AssetCategory, type Currency } from "@/lib/types";
 
 const VALID_CATEGORIES: AssetCategory[] = ["real_estate", "investment", "cash", "liability"];
@@ -17,9 +18,10 @@ function failLink(docId: string, message: string): never {
 }
 
 /**
- * Standalone upload from /capture. After the file is stored, takes the
- * user to /capture/[doc_id] where they link it to an asset and enter a
- * balance (step 4 is pre-AI; step 7 swaps in extraction).
+ * Upload + extract in one step. On success the user lands on the review
+ * page with the LLM-extracted fields pre-filled. On extraction failure
+ * the review page falls back to manual entry — the file is preserved
+ * so the user can still record a balance against it.
  */
 export async function uploadFromCapture(formData: FormData) {
   const file = formData.get("file");
@@ -38,22 +40,52 @@ export async function uploadFromCapture(formData: FormData) {
     .maybeSingle();
   if (!profile?.household_id) failCapture("Account is not yet provisioned.");
 
-  const result = await uploadDocument(supabase, profile.household_id, user.id, file);
-  if (!result.ok) failCapture(result.error);
+  const { data: household } = await supabase
+    .from("households")
+    .select("default_currency")
+    .eq("id", profile.household_id)
+    .maybeSingle();
+  const defaultCurrency = (household?.default_currency as Currency) ?? "GBP";
+
+  const uploaded = await uploadDocument(supabase, profile.household_id, user.id, file);
+  if (!uploaded.ok) failCapture(uploaded.error);
+
+  // Synchronous extraction. Worst case ~10s for vision-capable models.
+  // On failure we still redirect to the review page — the user can fall
+  // back to manual entry without losing the uploaded file.
+  const extraction = await extractStatement(
+    supabase,
+    uploaded.documentId,
+    profile.household_id,
+    defaultCurrency
+  );
 
   revalidatePath("/dashboard");
-  redirect(`/capture/${result.documentId}`);
+  if (!extraction.ok) {
+    redirect(
+      `/capture/${uploaded.documentId}?extract_error=${encodeURIComponent(extraction.error)}`
+    );
+  }
+  redirect(`/capture/${uploaded.documentId}`);
 }
 
 /**
- * Link a captured document to an asset by recording a balance entry.
- * If `asset_id === "__new__"` the action first creates a new asset.
+ * User confirms (and possibly edits) the extracted fields, picks an
+ * asset (existing or new), and we record the balance entry tagged with
+ * source='document' + source_document_id.
+ *
+ * Fields the user edited away from the extracted values flip
+ * manually_edited=true so we can learn from corrections later (PRD §5.2.1).
  */
 export async function linkDocumentToBalance(formData: FormData) {
   const documentId = String(formData.get("document_id") ?? "");
   const assetIdRaw = String(formData.get("asset_id") ?? "").trim();
   const amountRaw = String(formData.get("amount") ?? "").trim();
   const asOfDate = String(formData.get("as_of_date") ?? "").trim();
+  const currency = String(formData.get("currency") ?? "").trim() as Currency;
+  const sourceParam = String(formData.get("source") ?? "manual");
+  const confidenceRaw = String(formData.get("confidence") ?? "").trim();
+  const editedFlag = String(formData.get("edited") ?? "") === "1";
 
   if (!documentId) redirect("/dashboard");
   if (!assetIdRaw) failLink(documentId, "Pick an asset or choose to create one.");
@@ -78,28 +110,37 @@ export async function linkDocumentToBalance(formData: FormData) {
   if (assetId === "__new__") {
     const name = String(formData.get("new_asset_name") ?? "").trim();
     const category = String(formData.get("new_asset_category") ?? "") as AssetCategory;
-    const currency = String(formData.get("new_asset_currency") ?? "") as Currency;
+    const newCurrency = (String(formData.get("new_asset_currency") ?? "") || currency) as Currency;
     if (!name) failLink(documentId, "New asset needs a name.");
     if (!VALID_CATEGORIES.includes(category)) failLink(documentId, "Pick a category for the new asset.");
-    if (!CURRENCIES.includes(currency)) failLink(documentId, "Pick a currency for the new asset.");
+    if (!CURRENCIES.includes(newCurrency)) failLink(documentId, "Pick a currency for the new asset.");
 
     const { data: asset, error } = await supabase
       .from("assets")
-      .insert({ name, category, native_currency: currency })
+      .insert({ name, category, native_currency: newCurrency })
       .select("id")
       .single();
     if (error) failLink(documentId, `Could not create asset: ${error.message}`);
     assetId = asset!.id;
   }
 
-  // The balance is being typed in by the user (no AI yet), so source stays
-  // 'manual' even with a doc attached — the document is supporting evidence.
+  // source: 'document' when extraction produced the values (even if the
+  // user edited some); 'manual' when extraction failed and they typed
+  // everything by hand. manually_edited flips on any edit.
+  const balanceSource = sourceParam === "document" ? "document" : "manual";
+  const confidence =
+    balanceSource === "document" && /^(0|1)(\.\d+)?$/.test(confidenceRaw)
+      ? Number(confidenceRaw)
+      : null;
+
   const { error: balErr } = await supabase.from("balance_entries").insert({
     asset_id: assetId,
     amount: amount.toFixed(4),
     as_of_date: asOfDate,
-    source: "manual",
+    source: balanceSource,
     source_document_id: documentId,
+    confidence: confidence,
+    manually_edited: balanceSource === "document" ? editedFlag : false,
   });
   if (balErr) failLink(documentId, `Could not save balance: ${balErr.message}`);
 

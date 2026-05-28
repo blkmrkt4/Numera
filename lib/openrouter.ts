@@ -87,12 +87,24 @@ export async function syncModelCatalogue(): Promise<{
  * Make a single LLM call through OpenRouter, with no fallback chain.
  * Used by llm.call() to attempt primary then each fallback in turn.
  */
+type ResponseFormat =
+  | { type: "text" }
+  | { type: "json_object" }
+  | {
+      type: "json_schema";
+      json_schema: {
+        name: string;
+        schema: Record<string, unknown>;
+        strict?: boolean;
+      };
+    };
+
 export async function callOpenRouter(opts: {
   model: string;
   messages: Array<{ role: "system" | "user" | "assistant"; content: string | unknown[] }>;
   temperature?: number;
   max_tokens?: number;
-  response_format?: { type: "text" | "json_object" };
+  response_format?: ResponseFormat;
   timeoutMs?: number;
 }): Promise<{
   ok: true;
