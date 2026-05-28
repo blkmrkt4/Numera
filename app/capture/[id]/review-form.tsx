@@ -8,6 +8,7 @@ import {
   type AssetCategory,
   type Currency,
 } from "@/lib/types";
+import type { Proposal } from "@/lib/classification";
 import { linkDocumentToBalance } from "../actions";
 
 type Confidence = "low" | "medium" | "high";
@@ -36,11 +37,13 @@ export function ReviewForm({
   extracted,
   assets,
   todayIso,
+  proposal,
 }: {
   documentId: string;
   extracted: Extracted | null;
   assets: AssetOption[];
   todayIso: string;
+  proposal: Proposal | null;
 }) {
   const initialAmount = extracted ? String(extracted.balance_amount) : "";
   const initialDate = extracted?.as_of_date ?? todayIso;
@@ -55,25 +58,11 @@ export function ReviewForm({
   const [last4, setLast4] = useState(initialLast4);
 
   const [assetId, setAssetId] = useState<string>(() => {
-    // Try to match an existing asset by last4 or institution name when
-    // extraction worked, so the user's first click is on the right row.
-    if (!extracted) return "";
-    const last4 = extracted.account_last4;
-    const inst = extracted.institution_name?.toLowerCase().trim();
-    const byBoth = assets.find(
-      (a) =>
-        last4 &&
-        a.institution_name?.toLowerCase().trim() === inst &&
-        a.native_currency === extracted.currency
-    );
-    if (byBoth) return byBoth.id;
-    const byInst = assets.find(
-      (a) =>
-        inst &&
-        a.institution_name?.toLowerCase().trim() === inst &&
-        a.native_currency === extracted.currency
-    );
-    if (byInst) return byInst.id;
+    // Server-side classifier (lib/classification.ts) has already chosen.
+    // If it proposed UPDATE → that asset is preselected.
+    // If it proposed NEW → the "+ Create new asset" panel opens.
+    if (proposal?.action === "update") return proposal.asset_id;
+    if (proposal?.action === "new") return "__new__";
     return "";
   });
 

@@ -4,6 +4,8 @@ import { createClient } from "@/lib/supabase/server";
 import { getSignedDocumentUrl } from "@/lib/documents";
 import { formatDate, todayIso } from "@/lib/format";
 import type { AssetCategory, Currency } from "@/lib/types";
+import { classifyDocument, type AssetCandidate, type Proposal } from "@/lib/classification";
+import type { ExtractedStatement } from "@/lib/extraction";
 import { ReviewForm, type AssetOption, type Extracted } from "./review-form";
 
 export default async function CaptureLinkPage({
@@ -31,12 +33,12 @@ export default async function CaptureLinkPage({
 
   const signedUrl = await getSignedDocumentUrl(supabase, doc.storage_path);
 
-  // Load every asset in the household with its institution name so the
-  // review form can pre-select a match when extraction returns an
-  // institution + last4 it recognises.
+  // Load every asset in the household with its institution name + last4
+  // so the review form can pre-select a match and the classifier can
+  // make a structured proposal.
   const { data: assetsRaw } = await supabase
     .from("assets")
-    .select("id, name, category, native_currency, institution_id, institutions(name)")
+    .select("id, name, category, native_currency, account_last4, institution_id, institutions(name)")
     .eq("archived", false)
     .order("name", { ascending: true });
 
@@ -55,6 +57,23 @@ export default async function CaptureLinkPage({
     doc.status === "extracted" && doc.extracted_json
       ? (doc.extracted_json as Extracted)
       : null;
+
+  // Build the candidate list shape that the classifier expects.
+  const candidates: AssetCandidate[] = (assetsRaw ?? []).map((a) => {
+    const inst = Array.isArray(a.institutions) ? a.institutions[0] : a.institutions;
+    return {
+      id: a.id,
+      name: a.name,
+      category: a.category as AssetCategory,
+      native_currency: a.native_currency as Currency,
+      account_last4: a.account_last4 ?? null,
+      institution_name: inst?.name ?? null,
+    };
+  });
+
+  const proposal: Proposal | null = extracted
+    ? await classifyDocument(extracted as ExtractedStatement, candidates)
+    : null;
 
   const isImage = doc.mime_type.startsWith("image/");
   const isPdf = doc.mime_type === "application/pdf";
@@ -137,11 +156,14 @@ export default async function CaptureLinkPage({
             </p>
           ) : null}
 
+          {proposal ? <ProposalBanner proposal={proposal} /> : null}
+
           <ReviewForm
             documentId={doc.id}
             extracted={extracted}
             assets={assets}
             todayIso={todayIso()}
+            proposal={proposal}
           />
         </section>
       </main>
@@ -153,4 +175,34 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function ProposalBanner({ proposal }: { proposal: Proposal }) {
+  if (proposal.action === "update") {
+    return (
+      <div className="mb-4 rounded-md border border-green-300 bg-green-50 p-3 text-sm text-green-900 dark:border-green-900 dark:bg-green-950 dark:text-green-200">
+        <p>
+          <span className="font-medium">Update “{proposal.asset_name}”</span>
+          {proposal.confidence === "high" ? null : (
+            <span className="ml-2 rounded bg-green-100 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-green-900 dark:bg-green-900 dark:text-green-100">
+              {proposal.confidence}
+            </span>
+          )}
+          {proposal.used_llm ? (
+            <span className="ml-2 text-xs text-green-700 dark:text-green-300">
+              · resolved by LLM
+            </span>
+          ) : null}
+        </p>
+        <p className="mt-0.5 text-xs">{proposal.reason}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-4 rounded-md border border-neutral-300 bg-neutral-50 p-3 text-sm text-neutral-700 dark:border-neutral-700 dark:bg-neutral-900 dark:text-neutral-300">
+      <p className="font-medium">Create new asset</p>
+      <p className="mt-0.5 text-xs">{proposal.reason}</p>
+      {proposal.hint ? <p className="mt-1 text-xs italic">{proposal.hint}</p> : null}
+    </div>
+  );
 }
