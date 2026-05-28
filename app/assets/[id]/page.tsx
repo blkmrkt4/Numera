@@ -8,8 +8,10 @@ import {
   type Currency,
   type SaleCostOverrides,
 } from "@/lib/types";
-import { formatDate, formatMoney, relativeAge, todayIso } from "@/lib/format";
-import { ACCEPT_ATTRIBUTE, getSignedDocumentUrl } from "@/lib/documents";
+import { formatDate, formatMoney, isStale, relativeAge, todayIso } from "@/lib/format";
+import { ACCEPT_ATTRIBUTE } from "@/lib/document-constants";
+import { getSignedDocumentUrl } from "@/lib/documents";
+import { readPrivacyMode } from "@/lib/privacy";
 import { addBalance, archiveAsset, unarchiveAsset } from "./actions";
 import { addValuation, updateProperty } from "./property-actions";
 import { SaleScenarioPanel } from "./sale-scenario";
@@ -48,6 +50,7 @@ export default async function AssetDetailPage({
 
   const currency = asset.native_currency as Currency;
   const isProperty = asset.category === "real_estate";
+  const privacy = await readPrivacyMode();
 
   return (
     <div className="min-h-screen">
@@ -82,12 +85,18 @@ export default async function AssetDetailPage({
         ) : null}
 
         {isProperty ? (
-          <PropertyView assetId={asset.id} currency={currency} archived={asset.archived} />
+          <PropertyView
+            assetId={asset.id}
+            currency={currency}
+            archived={asset.archived}
+            privacy={privacy}
+          />
         ) : (
           <StandardAssetView
             assetId={asset.id}
             currency={currency}
             archived={asset.archived}
+            privacy={privacy}
           />
         )}
 
@@ -159,10 +168,12 @@ async function StandardAssetView({
   assetId,
   currency,
   archived,
+  privacy,
 }: {
   assetId: string;
   currency: Currency;
   archived: boolean;
+  privacy: boolean;
 }) {
   const supabase = await createClient();
 
@@ -197,14 +208,24 @@ async function StandardAssetView({
       <section className="mt-6">
         <p className="text-sm text-neutral-500">Current balance</p>
         <p className="mt-2 text-5xl font-medium tracking-tight tabular">
-          {latest ? formatMoney(latest.amount, currency) : "—"}
+          {latest ? formatMoney(latest.amount, currency, privacy) : "—"}
         </p>
         {latest ? (
-          <p className="mt-2 text-xs text-neutral-500">
+          <p
+            className={
+              "mt-2 text-xs " +
+              (isStale(latest.as_of_date)
+                ? "text-amber-700 dark:text-amber-500"
+                : "text-neutral-500")
+            }
+          >
             as of {formatDate(latest.as_of_date)} ({relativeAge(latest.as_of_date)})
+            {isStale(latest.as_of_date) ? " — stale" : ""}
           </p>
         ) : (
-          <p className="mt-2 text-xs text-neutral-500">No balance yet.</p>
+          <p className="mt-2 text-xs text-amber-700 dark:text-amber-500">
+            No balance yet.
+          </p>
         )}
       </section>
 
@@ -319,10 +340,12 @@ async function PropertyView({
   assetId,
   currency,
   archived,
+  privacy,
 }: {
   assetId: string;
   currency: Currency;
   archived: boolean;
+  privacy: boolean;
 }) {
   const supabase = await createClient();
 
@@ -391,17 +414,25 @@ async function PropertyView({
       <section className="mt-6">
         <p className="text-sm text-neutral-500">Net equity</p>
         <p className="mt-2 text-5xl font-medium tracking-tight tabular">
-          {netEquity != null ? formatMoney(netEquity, currency) : "—"}
+          {netEquity != null ? formatMoney(netEquity, currency, privacy) : "—"}
         </p>
         <div className="mt-2 flex flex-wrap items-baseline gap-x-4 text-xs text-neutral-500">
           <span>
             Market value:{" "}
             <span className="tabular">
-              {marketValue != null ? formatMoney(marketValue, currency) : "—"}
+              {marketValue != null ? formatMoney(marketValue, currency, privacy) : "—"}
             </span>
             {latestValuation ? (
-              <span className="ml-1 text-neutral-400">
-                (as of {formatDate(latestValuation.as_of_date)})
+              <span
+                className={
+                  "ml-1 " +
+                  (isStale(latestValuation.as_of_date)
+                    ? "text-amber-700 dark:text-amber-500"
+                    : "text-neutral-400")
+                }
+              >
+                (as of {formatDate(latestValuation.as_of_date)}
+                {isStale(latestValuation.as_of_date) ? " — stale" : ""})
               </span>
             ) : null}
           </span>
@@ -410,7 +441,7 @@ async function PropertyView({
               ·{" "}
               {mortgageName}:{" "}
               <span className="tabular">
-                − {formatMoney(mortgageBalance, currency)}
+                − {formatMoney(mortgageBalance, currency, privacy)}
               </span>
             </span>
           ) : null}
@@ -564,7 +595,7 @@ async function PropertyView({
               >
                 <div>
                   <p className="tabular text-base font-medium text-neutral-900 dark:text-neutral-100">
-                    {formatMoney(v.estimated_value, currency)}
+                    {formatMoney(v.estimated_value, currency, privacy)}
                   </p>
                   <p className="text-xs text-neutral-500">
                     {formatDate(v.as_of_date)}

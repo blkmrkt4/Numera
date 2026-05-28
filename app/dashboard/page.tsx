@@ -9,10 +9,13 @@ import {
   type AssetCategory,
   type Currency,
 } from "@/lib/types";
-import { formatDate, formatMoney, relativeAge } from "@/lib/format";
+import { formatDate, formatMoney, isStale, relativeAge } from "@/lib/format";
 import { readDisplayCurrencyCookie } from "@/lib/display-currency";
+import { readPrivacyMode } from "@/lib/privacy";
 import { convert, ensureFreshRates, loadLatestRates, type RateLookup } from "@/lib/fx";
-import { setDisplayCurrency } from "./actions";
+import { loadSnapshots } from "@/lib/snapshots";
+import { setDisplayCurrency, snapshotNow, togglePrivacyMode } from "./actions";
+import { HistoryChart, type ChartPoint } from "./history-chart";
 
 type AssetRow = {
   id: string;
@@ -50,6 +53,10 @@ export default async function DashboardPage() {
   const displayCurrency: Currency =
     cookieCurrency ?? (household?.default_currency as Currency) ?? "GBP";
 
+  // Privacy mode: hides every money figure server-side so the rendered
+  // HTML never carries digits when the toggle is on (PRD §9).
+  const privacy = await readPrivacyMode();
+
   // Make sure we have today's rates before computing totals.
   // Best-effort: failures fall back to most recent stored rate.
   await ensureFreshRates(supabase);
@@ -78,6 +85,24 @@ export default async function DashboardPage() {
     archived: a.archived,
     latest: latestByAsset.get(a.id) ?? null,
   }));
+
+  // Historical chart points — pre-computed snapshots, last 24 months.
+  // We pull on every load because there's no real cost (a handful of
+  // rows) and the user might have just clicked Snapshot now.
+  const snapshots = profile?.household_id
+    ? await loadSnapshots(profile.household_id, 24)
+    : [];
+  const chartPoints: ChartPoint[] = snapshots
+    .map((s) => {
+      const v = s.totals_by_currency?.[displayCurrency];
+      if (typeof v !== "number" || !Number.isFinite(v)) return null;
+      return {
+        snapshot_date: s.snapshot_date,
+        value: v,
+        carried: s.any_carried,
+      };
+    })
+    .filter((p): p is ChartPoint => p !== null);
 
   // Group by category for the breakdown.
   const byCategory: Record<AssetCategory, AssetRow[]> = {
@@ -109,8 +134,18 @@ export default async function DashboardPage() {
       <header className="border-b border-neutral-200 dark:border-neutral-800">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
           <h1 className="text-base font-medium tracking-tight">Numara</h1>
-          <div className="flex items-center gap-4 text-sm">
+          <div className="flex items-center gap-3 text-sm">
             <span className="text-neutral-500">{profile?.email ?? user.email}</span>
+            <form action={togglePrivacyMode}>
+              <button
+                type="submit"
+                aria-label={privacy ? "Show balances" : "Hide balances"}
+                title={privacy ? "Show balances" : "Hide balances"}
+                className="rounded-md border border-neutral-300 px-2.5 py-1.5 text-neutral-700 transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
+              >
+                {privacy ? "👁" : "•"}
+              </button>
+            </form>
             <form action={signOut}>
               <button
                 type="submit"
@@ -136,7 +171,7 @@ export default async function DashboardPage() {
               </p>
             ) : (
               <p className="mt-2 text-5xl font-medium tracking-tight tabular">
-                {formatMoney(netWorth, displayCurrency)}
+                {formatMoney(netWorth, displayCurrency, privacy)}
               </p>
             )}
             <p className="mt-2 text-xs text-neutral-500">
@@ -175,21 +210,55 @@ export default async function DashboardPage() {
             </p>
           </section>
         ) : (
-          <section className="mt-12 space-y-10">
-            {CATEGORY_ORDER.map((cat) => {
-              const rows = byCategory[cat];
-              if (rows.length === 0) return null;
-              return (
-                <CategorySection
-                  key={cat}
-                  category={cat}
-                  rows={rows}
-                  displayCurrency={displayCurrency}
-                  rates={rates}
+          <>
+            <AlertsStrip assets={assets} />
+
+            {chartPoints.length >= 2 ? (
+              <section className="mt-10">
+                <HistoryChart
+                  points={chartPoints}
+                  currency={displayCurrency}
+                  privacy={privacy}
                 />
-              );
-            })}
-          </section>
+              </section>
+            ) : null}
+
+            <section className="mt-12 space-y-10">
+              {CATEGORY_ORDER.map((cat) => {
+                const rows = byCategory[cat];
+                if (rows.length === 0) return null;
+                return (
+                  <CategorySection
+                    key={cat}
+                    category={cat}
+                    rows={rows}
+                    displayCurrency={displayCurrency}
+                    rates={rates}
+                    privacy={privacy}
+                  />
+                );
+              })}
+            </section>
+
+            <section className="mt-12 border-t border-neutral-200 pt-6 dark:border-neutral-800">
+              <h2 className="text-sm font-medium text-neutral-700 dark:text-neutral-300">
+                Snapshots
+              </h2>
+              <p className="mt-1 text-xs text-neutral-500">
+                {snapshots.length === 0
+                  ? "No snapshots yet. Take one to start a history."
+                  : `${snapshots.length} snapshot${snapshots.length === 1 ? "" : "s"} on file. Auto-monthly snapshots arrive when this is deployed; until then take them manually.`}
+              </p>
+              <form action={snapshotNow} className="mt-3">
+                <button
+                  type="submit"
+                  className="rounded-md border border-neutral-300 px-4 py-2 text-sm text-neutral-700 transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
+                >
+                  Snapshot now
+                </button>
+              </form>
+            </section>
+          </>
         )}
 
         {profile?.is_system_admin ? (
@@ -231,16 +300,60 @@ function CurrencyToggle({ current }: { current: Currency }) {
   );
 }
 
+function AlertsStrip({ assets }: { assets: AssetRow[] }) {
+  // Stale = no balance ever, or latest balance > 90 days old (PRD §5.6).
+  const stale = assets
+    .filter((a) => isStale(a.latest?.as_of_date))
+    .sort((a, b) => {
+      const ad = a.latest?.as_of_date ?? "0";
+      const bd = b.latest?.as_of_date ?? "0";
+      return ad.localeCompare(bd);
+    });
+
+  if (stale.length === 0) return null;
+
+  return (
+    <section className="mt-8 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
+      <p className="font-medium">
+        {stale.length === 1
+          ? "1 asset needs a fresh balance"
+          : `${stale.length} assets need a fresh balance`}
+      </p>
+      <ul className="mt-2 space-y-1 text-xs">
+        {stale.slice(0, 5).map((a) => (
+          <li key={a.id} className="flex items-baseline justify-between gap-3">
+            <Link href={`/assets/${a.id}`} className="underline">
+              {a.name}
+            </Link>
+            <span className="text-amber-700 dark:text-amber-400">
+              {a.latest
+                ? `updated ${relativeAge(a.latest.as_of_date)}`
+                : "never updated"}
+            </span>
+          </li>
+        ))}
+        {stale.length > 5 ? (
+          <li className="text-amber-700 dark:text-amber-400">
+            + {stale.length - 5} more
+          </li>
+        ) : null}
+      </ul>
+    </section>
+  );
+}
+
 function CategorySection({
   category,
   rows,
   displayCurrency,
   rates,
+  privacy,
 }: {
   category: AssetCategory;
   rows: AssetRow[];
   displayCurrency: Currency;
   rates: RateLookup;
+  privacy: boolean;
 }) {
   // Subtotal in display currency (liabilities still positive at the category
   // level — they only subtract from the headline net worth).
@@ -272,7 +385,7 @@ function CategorySection({
           {CATEGORY_LABELS[category]}
         </h2>
         <span className="text-sm text-neutral-500 tabular">
-          {formatMoney(subtotal, displayCurrency)}
+          {formatMoney(subtotal, displayCurrency, privacy)}
           {anyMissing ? <span className="ml-2 text-amber-700 dark:text-amber-500">·</span> : null}
         </span>
       </div>
@@ -287,6 +400,7 @@ function CategorySection({
           const showConversion =
             latest && a.native_currency !== displayCurrency && converted !== null;
 
+          const rowIsStale = isStale(latest?.as_of_date);
           return (
             <li key={a.id}>
               <Link
@@ -300,7 +414,16 @@ function CategorySection({
                   <p className="text-xs text-neutral-500">
                     {a.native_currency}
                     {latest ? (
-                      <span className="ml-2">· updated {relativeAge(latest.as_of_date)}</span>
+                      <span
+                        className={
+                          "ml-2 " +
+                          (rowIsStale
+                            ? "text-amber-700 dark:text-amber-500"
+                            : "")
+                        }
+                      >
+                        · updated {relativeAge(latest.as_of_date)}
+                      </span>
                     ) : (
                       <span className="ml-2 text-amber-700 dark:text-amber-500">
                         · no balance yet
@@ -310,11 +433,11 @@ function CategorySection({
                 </div>
                 <div className="text-right">
                   <p className="text-base tabular text-neutral-900 dark:text-neutral-100">
-                    {latest ? formatMoney(latest.amount, a.native_currency) : "—"}
+                    {latest ? formatMoney(latest.amount, a.native_currency, privacy) : "—"}
                   </p>
                   {showConversion ? (
                     <p className="text-xs tabular text-neutral-500">
-                      ≈ {formatMoney(converted!, displayCurrency)}
+                      ≈ {formatMoney(converted!, displayCurrency, privacy)}
                     </p>
                   ) : null}
                 </div>

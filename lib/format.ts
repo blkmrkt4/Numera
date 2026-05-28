@@ -21,10 +21,35 @@ const FORMATTERS: Record<Currency, Intl.NumberFormat> = {
 // USD with narrowSymbol gives "$1,234.56"; CAD with default symbol gives "CA$1,234.56".
 // GBP gives "£1,234.56".
 
-export function formatMoney(amount: number | string, currency: Currency): string {
+export function formatMoney(
+  amount: number | string,
+  currency: Currency,
+  masked: boolean = false
+): string {
   const n = typeof amount === "string" ? Number(amount) : amount;
   if (!Number.isFinite(n)) return "—";
+  if (masked) {
+    // Preserve the currency symbol so the layout doesn't reflow when the
+    // user toggles privacy mode mid-session; only digits get hidden.
+    const symbol = currency === "GBP" ? "£" : currency === "USD" ? "$" : "CA$";
+    return `${symbol}••••••`;
+  }
   return FORMATTERS[currency].format(n);
+}
+
+export const STALE_DAYS = 90;
+
+export function daysSince(iso: string): number {
+  const [y, m, d] = iso.split("-").map(Number);
+  if (!y || !m || !d) return Number.POSITIVE_INFINITY;
+  const then = new Date(y, m - 1, d);
+  const now = new Date();
+  return Math.floor((now.getTime() - then.getTime()) / (1000 * 60 * 60 * 24));
+}
+
+export function isStale(iso: string | null | undefined, threshold = STALE_DAYS): boolean {
+  if (!iso) return true;
+  return daysSince(iso) > threshold;
 }
 
 export function formatDate(iso: string): string {
