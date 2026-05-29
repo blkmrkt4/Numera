@@ -154,6 +154,16 @@ export default async function AssetDetailPage({
                   ))}
                 </select>
               </label>
+              <label className="block text-sm text-neutral-600 dark:text-neutral-400">
+                Institution <span className="text-neutral-400">(optional)</span>
+                <input
+                  type="text"
+                  name="institution"
+                  defaultValue={institution?.name ?? ""}
+                  placeholder="e.g. Charles Schwab"
+                  className="mt-1 block w-64 rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 outline-none focus:border-neutral-900 dark:border-neutral-700 dark:bg-neutral-950 dark:text-neutral-50 dark:focus:border-neutral-100"
+                />
+              </label>
               <button
                 type="submit"
                 className="rounded-md bg-neutral-900 px-4 py-2 text-sm text-white transition-opacity hover:opacity-90 dark:bg-white dark:text-neutral-900"

@@ -72,12 +72,14 @@ export async function updateAssetDetails(formData: FormData) {
   const assetId = String(formData.get("asset_id") ?? "");
   const name = String(formData.get("name") ?? "").trim();
   const category = String(formData.get("category") ?? "").trim();
+  const institutionName = String(formData.get("institution") ?? "").trim();
 
   if (!assetId) redirect("/dashboard");
   if (!name) failBalance(assetId, "Name is required.");
   if (!(CATEGORY_ORDER as string[]).includes(category)) {
     failBalance(assetId, "Pick a valid category.");
   }
+  if (institutionName.length > 100) failBalance(assetId, "Institution name is too long.");
 
   const supabase = await createClient();
   const {
@@ -93,9 +95,32 @@ export async function updateAssetDetails(formData: FormData) {
   if (!current) failBalance(assetId, "Asset not found.");
   const oldCategory = current!.category as string;
 
+  // Resolve or create the institution by name (case-insensitive, per-household),
+  // mirroring the new-asset flow. Blank clears the link. household_id is filled
+  // by the column default (current_household_id()).
+  let institutionId: string | null = null;
+  if (institutionName) {
+    const { data: existing } = await supabase
+      .from("institutions")
+      .select("id")
+      .ilike("name", institutionName)
+      .maybeSingle();
+    if (existing) {
+      institutionId = existing.id;
+    } else {
+      const { data: created, error: insErr } = await supabase
+        .from("institutions")
+        .insert({ name: institutionName })
+        .select("id")
+        .single();
+      if (insErr) failBalance(assetId, `Could not save institution: ${insErr.message}`);
+      institutionId = created!.id;
+    }
+  }
+
   const { error } = await supabase
     .from("assets")
-    .update({ name, category })
+    .update({ name, category, institution_id: institutionId })
     .eq("id", assetId);
   if (error) failBalance(assetId, `Could not update: ${error.message}`);
 
