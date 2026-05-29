@@ -122,7 +122,7 @@ Always go through this flow, never inline:
 - Currency symbol shown but visually de-emphasised.
 - Staleness is visible: amber dot for assets >90 days old, last-updated date always shown.
 - Privacy mode: one tap blurs all balances site-wide. Implement as a global state, not per-component.
-- Use **Numara's accent colour sparingly** — single accent on a monochrome ground. If you find yourself reaching for a second colour, ask first.
+- Use **Numara's accent colour sparingly** — single accent on a monochrome ground. If you find yourself reaching for a second colour, ask first. **Exception: data visualisations (charts) are deliberately colourful — draw from the Numara chart palette in `lib/chart-palette.ts`, per PRD §9.1.**
 
 ---
 

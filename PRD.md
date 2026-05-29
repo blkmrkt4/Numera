@@ -14,6 +14,7 @@
 
 | Version | Changes |
 |---|---|
+| **v0.4** | Added §9.1 colour & data-visualisation principle: the app chrome stays monochrome, but charts are colourful and graphic, drawing from the electric Numara palette (single source in `lib/chart-palette.ts`). Wealth-over-time chart upgraded to a stacked-area view switchable by asset class / country / currency, with net-vs-gross-assets toggle, inline series labels, and CAGR (total and per-asset). |
 | **v0.3** | All LLM calls now route through OpenRouter (no direct provider SDKs). Added an admin-only backend (§14) for managing API keys, prompts, slugs, model bindings, and fallbacks. Two admin pages: Settings (API keys + defaults) and Prompts (combined prompt editor and model binding, with a searchable model picker showing every OpenRouter model, cost, context window, and capability indicators). Each prompt binding supports a primary model plus two fallbacks. Data model extended with `SystemSecret`, `Prompt`, `PromptVersion`, `PromptBinding`, and `OpenRouterModel` entities. `User.is_system_admin` flag added. Build sequence updated. |
 | v0.2 | Open questions resolved: manual entry is supported in v1 alongside document-driven capture. Extracted fields are now shown explicitly for user verification before save. Recurring outgoings live in a separate cash-flow view, not netted into net worth. Historical net worth is computed as monthly snapshots. Data model is household-ready from day one; UI remains single-user in v1. |
 | v0.1 | Initial draft. |
@@ -287,6 +288,26 @@ These are global (not household-scoped) and only readable / writable by users wi
 - **Numbers are the hero.** Large, tabular figures for balances. Right-aligned in lists. Currency symbol shown but de-emphasised.
 - **Staleness is visible.** An asset that hasn't been updated in a while should make itself known without alarmism.
 - **Privacy mode:** a single tap blurs all balances for over-shoulder situations.
+
+### 9.1 Colour and data visualisation
+
+The application chrome is monochrome — a black / charcoal / white ground with the single brand accent used sparingly. **Data visualisations are the deliberate exception: charts are colourful and graphic.** A composition chart is unreadable in one colour, so charts draw from the electric Numara palette below. The rule of thumb: structure stays monochrome (axes, gridlines, the total line, labels render in the foreground colour), while the *data itself* (areas, bars, series) is coloured.
+
+The palette is implemented once in `lib/chart-palette.ts`; chart components reference it and never inline hex values.
+
+| Token | Hex | Role |
+|---|---|---|
+| Rize Black | `#0A0A0A` | Primary background |
+| Deep Charcoal | `#0F0F0F` | Section background |
+| Rize White | `#F0F0F0` | Primary text on dark |
+| Electric Yellow | `#F4EE35` | Brand mark · primary accent · chart: **cash** |
+| Electric Ice | `#3AAFFF` | Chart: **investments** |
+| Cedar Sage | `#6BBF8A` | Chart: **real estate** |
+| Hot Coral | `#FF5F3A` | Chart: **liabilities** |
+| Reserve Gold | `#C4952A` | Chart accent (spare) |
+
+- **Asset-class series** use the fixed mapping above so a category always reads as the same colour.
+- **Country / currency series** (and any other categorical breakdown) cycle the ordered series palette — the five brand accents first, then electric violet / teal / pink to extend without falling back to greys.
 
 ---
 
