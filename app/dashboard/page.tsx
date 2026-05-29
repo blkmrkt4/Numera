@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { ReactNode } from "react";
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { signOut } from "@/app/login/actions";
@@ -14,8 +15,9 @@ import { readDisplayCurrencyCookie } from "@/lib/display-currency";
 import { readPrivacyMode } from "@/lib/privacy";
 import { convert, ensureFreshRates, loadLatestRates, type RateLookup } from "@/lib/fx";
 import { loadSnapshots } from "@/lib/snapshots";
+import { buildWealthTimeseries } from "@/lib/timeseries";
 import { setDisplayCurrency, snapshotNow, togglePrivacyMode } from "./actions";
-import { HistoryChart, type ChartPoint } from "./history-chart";
+import { WealthChart } from "./wealth-chart";
 
 type AssetRow = {
   id: string;
@@ -92,17 +94,12 @@ export default async function DashboardPage() {
   const snapshots = profile?.household_id
     ? await loadSnapshots(profile.household_id, 24)
     : [];
-  const chartPoints: ChartPoint[] = snapshots
-    .map((s) => {
-      const v = s.totals_by_currency?.[displayCurrency];
-      if (typeof v !== "number" || !Number.isFinite(v)) return null;
-      return {
-        snapshot_date: s.snapshot_date,
-        value: v,
-        carried: s.any_carried,
-      };
-    })
-    .filter((p): p is ChartPoint => p !== null);
+
+  // Wealth-over-time chart data, computed live from raw balance entries so it
+  // can break down by asset class / country / currency across all history.
+  const timeseries = profile?.household_id
+    ? await buildWealthTimeseries(profile.household_id, displayCurrency)
+    : null;
 
   // Group by category for the breakdown.
   const byCategory: Record<AssetCategory, AssetRow[]> = {
@@ -136,16 +133,17 @@ export default async function DashboardPage() {
           <h1 className="text-base font-medium tracking-tight">Numara</h1>
           <div className="flex items-center gap-3 text-sm">
             <span className="text-neutral-500">{profile?.email ?? user.email}</span>
-            <form action={togglePrivacyMode}>
-              <button
-                type="submit"
-                aria-label={privacy ? "Show balances" : "Hide balances"}
-                title={privacy ? "Show balances" : "Hide balances"}
-                className="rounded-md border border-neutral-300 px-2.5 py-1.5 text-neutral-700 transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
-              >
-                {privacy ? "👁" : "•"}
-              </button>
-            </form>
+            <Tooltip label={privacy ? "Show all balances" : "Hide all balances"}>
+              <form action={togglePrivacyMode}>
+                <button
+                  type="submit"
+                  aria-label={privacy ? "Show all balances" : "Hide all balances"}
+                  className="rounded-md border border-neutral-300 px-2.5 py-1.5 text-neutral-700 transition-colors hover:bg-neutral-100 dark:border-neutral-700 dark:text-neutral-200 dark:hover:bg-neutral-900"
+                >
+                  {privacy ? "👁" : "•"}
+                </button>
+              </form>
+            </Tooltip>
             <form action={signOut}>
               <button
                 type="submit"
@@ -163,7 +161,9 @@ export default async function DashboardPage() {
           <div>
             <div className="flex items-center gap-3">
               <p className="text-sm text-neutral-500">Net worth</p>
-              <CurrencyToggle current={displayCurrency} />
+              <Tooltip label="Switch display currency">
+                <CurrencyToggle current={displayCurrency} />
+              </Tooltip>
             </div>
             {assets.length === 0 ? (
               <p className="mt-2 text-5xl font-medium tracking-tight tabular text-neutral-400">
@@ -213,13 +213,9 @@ export default async function DashboardPage() {
           <>
             <AlertsStrip assets={assets} />
 
-            {chartPoints.length >= 2 ? (
+            {timeseries && timeseries.months.length >= 2 ? (
               <section className="mt-10">
-                <HistoryChart
-                  points={chartPoints}
-                  currency={displayCurrency}
-                  privacy={privacy}
-                />
+                <WealthChart data={timeseries} privacy={privacy} />
               </section>
             ) : null}
 
@@ -270,6 +266,23 @@ export default async function DashboardPage() {
         ) : null}
       </main>
     </div>
+  );
+}
+
+// CSS-only hover/focus tooltip. No JS state, so it works inside server
+// components and appears instantly (unlike the ~1s native `title` delay).
+// Positioned below its trigger so the header's top edge never clips it.
+function Tooltip({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <span className="group relative inline-flex">
+      {children}
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-1/2 top-full z-20 mt-2 -translate-x-1/2 whitespace-nowrap rounded-md bg-neutral-900 px-2 py-1 text-xs text-white opacity-0 shadow-sm transition-opacity duration-100 group-hover:opacity-100 group-focus-within:opacity-100 dark:bg-neutral-100 dark:text-neutral-900"
+      >
+        {label}
+      </span>
+    </span>
   );
 }
 
